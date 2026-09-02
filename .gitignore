@@ -1,0 +1,10 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.env
+buddy.db
+buddy.db-journal
+buddy.db-shm
+buddy.db-wal
+.DS_Store
