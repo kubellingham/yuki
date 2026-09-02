@@ -1,0 +1,285 @@
+"""Turso (hosted libsql / sqlite) storage. Raw SQL, no ORM.
+
+Same schema shape as the polling prototype, plus `bot_state` for the db-backed
+onboarding state machine (we can't rely on process memory in serverless).
+"""
+from __future__ import annotations
+
+import json
+import logging
+from datetime import datetime, timezone
+from typing import Any
+
+import libsql_client
+
+from yuki.config import TURSO_AUTH_TOKEN, TURSO_DATABASE_URL
+
+logger = logging.getLogger(__name__)
+
+
+SCHEMA_STATEMENTS = [
+    """
+    CREATE TABLE IF NOT EXISTS users (
+        telegram_id     INTEGER PRIMARY KEY,
+        name            TEXT NOT NULL,
+        start_weight    REAL NOT NULL,
+        target_weight   REAL NOT NULL,
+        deadline_date   TEXT NOT NULL,
+        created_at      TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS goals (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id      INTEGER NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+        title        TEXT NOT NULL,
+        goal_type    TEXT NOT NULL CHECK (goal_type IN ('shared', 'core')),
+        description  TEXT,
+        active       INTEGER NOT NULL DEFAULT 1,
+        created_at   TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS buddy_state (
+        user_id         INTEGER PRIMARY KEY REFERENCES users(telegram_id) ON DELETE CASCADE,
+        name            TEXT NOT NULL,
+        bio             TEXT NOT NULL DEFAULT '',
+        current_weight  REAL NOT NULL,
+        true_weight     REAL NOT NULL,
+        mood            TEXT,
+        streak          INTEGER NOT NULL DEFAULT 0,
+        last_event      TEXT,
+        updated_at      TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS buddy_life (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id      INTEGER NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+        domain       TEXT NOT NULL CHECK (domain IN ('study','language','social','weight','other')),
+        description  TEXT NOT NULL,
+        occurred_at  TEXT NOT NULL,
+        resolved     INTEGER NOT NULL DEFAULT 0
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS messages (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id    INTEGER NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+        role       TEXT NOT NULL CHECK (role IN ('user', 'buddy')),
+        content    TEXT NOT NULL,
+        timestamp  TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS memories (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id     INTEGER NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+        category    TEXT NOT NULL CHECK (category IN ('fact','preference','event','callback')),
+        content     TEXT NOT NULL,
+        importance  INTEGER NOT NULL CHECK (importance BETWEEN 1 AND 5),
+        created_at  TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS reminders (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id        INTEGER NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+        text           TEXT NOT NULL,
+        scheduled_for  TEXT NOT NULL,
+        recurring      INTEGER NOT NULL DEFAULT 0,
+        created_at     TEXT NOT NULL
+    )
+    """,
+    # Onboarding state can't live on `users` because onboarding is what creates the users row.
+    # Reset confirmation shares the same table via `reset_pending`.
+    """
+    CREATE TABLE IF NOT EXISTS bot_state (
+        telegram_id       INTEGER PRIMARY KEY,
+        onboarding_step   TEXT,
+        onboarding_data   TEXT,
+        reset_pending     INTEGER NOT NULL DEFAULT 0,
+        updated_at        TEXT NOT NULL
+    )
+    """,
+]
+
+
+def _client() -> libsql_client.Client:
+    return libsql_client.create_client_sync(
+        url=TURSO_DATABASE_URL,
+        auth_token=TURSO_AUTH_TOKEN,
+    )
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _row_to_dict(rs: Any, row: Any) -> dict[str, Any]:
+    return {col: row[col] for col in rs.columns}
+
+
+# ---------------------------------------------------------------- schema ----
+
+def apply_schema() -> None:
+    """Idempotent — safe to run repeatedly. Called by scripts/migrate.py."""
+    with _client() as c:
+        for stmt in SCHEMA_STATEMENTS:
+            c.execute(stmt)
+    logger.info("schema applied")
+
+
+# ----------------------------------------------------------------- users ----
+
+def get_user(telegram_id: int) -> dict[str, Any] | None:
+    with _client() as c:
+        rs = c.execute(
+            "SELECT * FROM users WHERE telegram_id = ?", [telegram_id]
+        )
+        if not rs.rows:
+            return None
+        return _row_to_dict(rs, rs.rows[0])
+
+
+def create_user(
+    telegram_id: int,
+    name: str,
+    start_weight: float,
+    target_weight: float,
+    deadline_date: str,
+    buddy_name: str,
+) -> None:
+    """Create the user row AND the matching buddy_state row.
+
+    Yuki starts at the same weight, target, and deadline — that's the shared journey.
+    """
+    now = _now_iso()
+    with _client() as c:
+        c.batch([
+            libsql_client.Statement(
+                "INSERT INTO users"
+                " (telegram_id, name, start_weight, target_weight, deadline_date, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                [telegram_id, name, start_weight, target_weight, deadline_date, now],
+            ),
+            libsql_client.Statement(
+                "INSERT INTO buddy_state"
+                " (user_id, name, bio, current_weight, true_weight, mood, streak, last_event, updated_at)"
+                " VALUES (?, ?, '', ?, ?, NULL, 0, NULL, ?)",
+                [telegram_id, buddy_name, start_weight, start_weight, now],
+            ),
+        ])
+    logger.info(
+        "created user telegram_id=%s name=%s buddy=%s start=%.1f target=%.1f deadline=%s",
+        telegram_id, name, buddy_name, start_weight, target_weight, deadline_date,
+    )
+
+
+def get_buddy_state(user_id: int) -> dict[str, Any] | None:
+    with _client() as c:
+        rs = c.execute(
+            "SELECT * FROM buddy_state WHERE user_id = ?", [user_id]
+        )
+        if not rs.rows:
+            return None
+        return _row_to_dict(rs, rs.rows[0])
+
+
+def log_message(user_id: int, role: str, content: str) -> None:
+    with _client() as c:
+        c.execute(
+            "INSERT INTO messages (user_id, role, content, timestamp)"
+            " VALUES (?, ?, ?, ?)",
+            [user_id, role, content, _now_iso()],
+        )
+    logger.info("logged message user_id=%s role=%s len=%d", user_id, role, len(content))
+
+
+def wipe_user(telegram_id: int) -> None:
+    """Cascade wipes users + all child rows. Also clears bot_state."""
+    with _client() as c:
+        # Turso's libsql enforces FKs when the driver requests it; be explicit anyway.
+        c.batch([
+            libsql_client.Statement(
+                "DELETE FROM goals        WHERE user_id = ?", [telegram_id]
+            ),
+            libsql_client.Statement(
+                "DELETE FROM buddy_state  WHERE user_id = ?", [telegram_id]
+            ),
+            libsql_client.Statement(
+                "DELETE FROM buddy_life   WHERE user_id = ?", [telegram_id]
+            ),
+            libsql_client.Statement(
+                "DELETE FROM messages     WHERE user_id = ?", [telegram_id]
+            ),
+            libsql_client.Statement(
+                "DELETE FROM memories     WHERE user_id = ?", [telegram_id]
+            ),
+            libsql_client.Statement(
+                "DELETE FROM reminders    WHERE user_id = ?", [telegram_id]
+            ),
+            libsql_client.Statement(
+                "DELETE FROM users        WHERE telegram_id = ?", [telegram_id]
+            ),
+            libsql_client.Statement(
+                "DELETE FROM bot_state    WHERE telegram_id = ?", [telegram_id]
+            ),
+        ])
+    logger.info("wiped all data for telegram_id=%s", telegram_id)
+
+
+# ------------------------------------------------------------- bot_state ----
+# Db-backed replacement for python-telegram-bot ConversationHandler state.
+
+def get_bot_state(telegram_id: int) -> dict[str, Any] | None:
+    with _client() as c:
+        rs = c.execute(
+            "SELECT * FROM bot_state WHERE telegram_id = ?", [telegram_id]
+        )
+        if not rs.rows:
+            return None
+        row = _row_to_dict(rs, rs.rows[0])
+        if row.get("onboarding_data"):
+            row["onboarding_data"] = json.loads(row["onboarding_data"])
+        else:
+            row["onboarding_data"] = {}
+        return row
+
+
+def set_onboarding(telegram_id: int, step: str | None, data: dict[str, Any]) -> None:
+    """Upsert onboarding progress. step=None clears onboarding (row remains for reset flag)."""
+    now = _now_iso()
+    payload = json.dumps(data) if data else None
+    with _client() as c:
+        c.execute(
+            "INSERT INTO bot_state (telegram_id, onboarding_step, onboarding_data, reset_pending, updated_at)"
+            " VALUES (?, ?, ?, 0, ?)"
+            " ON CONFLICT(telegram_id) DO UPDATE SET"
+            "   onboarding_step = excluded.onboarding_step,"
+            "   onboarding_data = excluded.onboarding_data,"
+            "   updated_at      = excluded.updated_at",
+            [telegram_id, step, payload, now],
+        )
+
+
+def clear_onboarding(telegram_id: int) -> None:
+    with _client() as c:
+        c.execute(
+            "UPDATE bot_state SET onboarding_step = NULL, onboarding_data = NULL, updated_at = ?"
+            " WHERE telegram_id = ?",
+            [_now_iso(), telegram_id],
+        )
+
+
+def set_reset_pending(telegram_id: int, pending: bool) -> None:
+    now = _now_iso()
+    with _client() as c:
+        c.execute(
+            "INSERT INTO bot_state (telegram_id, reset_pending, updated_at)"
+            " VALUES (?, ?, ?)"
+            " ON CONFLICT(telegram_id) DO UPDATE SET"
+            "   reset_pending = excluded.reset_pending,"
+            "   updated_at    = excluded.updated_at",
+            [telegram_id, 1 if pending else 0, now],
+        )
