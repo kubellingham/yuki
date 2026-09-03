@@ -106,8 +106,15 @@ SCHEMA_STATEMENTS = [
 
 
 def _client() -> libsql_client.Client:
+    # Vercel's serverless runtime doesn't support outbound WSS reliably, and
+    # libsql-client's default transport for `libsql://` URLs is WebSocket.
+    # Force the HTTP transport by rewriting the scheme — same protocol on
+    # the Turso side, works everywhere.
+    url = TURSO_DATABASE_URL
+    if url.startswith("libsql://"):
+        url = "https://" + url[len("libsql://"):]
     return libsql_client.create_client_sync(
-        url=TURSO_DATABASE_URL,
+        url=url,
         auth_token=TURSO_AUTH_TOKEN,
     )
 
