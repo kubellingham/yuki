@@ -1,8 +1,8 @@
 """Top-level Telegram Update router.
 
 `handle_update` is called once per webhook invocation with the raw dict body.
-It resolves the current bot_state (mid-onboarding? reset pending?) and routes
-to the matching handler in yuki.handlers.
+It resolves the current bot_state (mid-onboarding? mid-setup-goals? reset
+pending?) and routes to the matching handler in yuki.handlers.
 """
 from __future__ import annotations
 
@@ -10,9 +10,15 @@ import logging
 from typing import Any
 
 from yuki.config import MY_TELEGRAM_ID
-from yuki.db import get_bot_state
+from yuki.db import (
+    clear_onboarding,
+    clear_setup_goals,
+    get_bot_state,
+    set_reset_pending,
+)
 from yuki.handlers import (
     continue_onboarding,
+    continue_setup_goals,
     handle_access_denied,
     handle_free_text,
     handle_reset,
@@ -21,6 +27,7 @@ from yuki.handlers import (
     handle_start,
     handle_status,
 )
+from yuki.telegram import send_message
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +36,9 @@ COMMANDS = {
 }
 
 
-def _extract(update: dict[str, Any]) -> tuple[int | None, int | None, str | None, str | None] | None:
+def _extract(
+    update: dict[str, Any],
+) -> tuple[int | None, int | None, str | None, str | None] | None:
     """Pull chat_id, user_id, username, text from an Update. Returns None on
     unsupported update types (edits, callbacks, channel posts, …)."""
     msg = update.get("message")
@@ -65,10 +74,9 @@ def handle_update(update: dict[str, Any]) -> None:
 
     # /cancel resets any pending flow — usable anywhere.
     if text.strip() == "/cancel":
-        from yuki.db import clear_onboarding, set_reset_pending
         clear_onboarding(user_id)
+        clear_setup_goals(user_id)
         set_reset_pending(user_id, False)
-        from yuki.telegram import send_message
         send_message(chat_id, "okay, cancelled.")
         return
 
@@ -79,14 +87,24 @@ def handle_update(update: dict[str, Any]) -> None:
         handle_reset_confirm(chat_id, user_id, text)
         return
 
-    # 2) Mid-onboarding: route to the current step regardless of what they typed
-    #    (except /start which restarts the flow — handled below).
-    step = state.get("onboarding_step")
-    if step and not text.startswith("/start"):
-        continue_onboarding(chat_id, user_id, text, step, state.get("onboarding_data") or {})
+    # 2) Mid-onboarding: route to the current step (unless they retyped /start).
+    onb_step = state.get("onboarding_step")
+    if onb_step and not text.startswith("/start"):
+        continue_onboarding(
+            chat_id, user_id, text, onb_step, state.get("onboarding_data") or {}
+        )
         return
 
-    # 3) Commands.
+    # 3) Mid-setup-goals: route to the current step. /start and /reset can
+    #    still interrupt — everything else stays in-flow.
+    sg_step = state.get("setup_goals_step")
+    if sg_step and not text.startswith(("/start", "/reset")):
+        continue_setup_goals(
+            chat_id, user_id, text, sg_step, state.get("setup_goals_data") or {}
+        )
+        return
+
+    # 4) Commands.
     if text.startswith("/"):
         cmd = text.split()[0].split("@")[0]  # strip "@botname" suffix if present
         if cmd == "/start":
@@ -98,9 +116,8 @@ def handle_update(update: dict[str, Any]) -> None:
         elif cmd == "/setup_goals":
             handle_setup_goals(chat_id, user_id)
         else:
-            from yuki.telegram import send_message
             send_message(chat_id, "not a command i know. try /status or /setup_goals.")
         return
 
-    # 4) Free-form text.
+    # 5) Free-form text.
     handle_free_text(chat_id, user_id, text)

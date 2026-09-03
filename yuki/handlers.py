@@ -1,7 +1,7 @@
 """Command + text handlers. All copy is hardcoded — no LLM yet.
 
-Onboarding + reset state live in the `bot_state` table rather than in-process,
-because each serverless invocation is a fresh Python process.
+Onboarding / setup_goals / reset all live in the `bot_state` table rather
+than in-process, because each serverless invocation is a fresh Python process.
 """
 from __future__ import annotations
 
@@ -15,25 +15,68 @@ import dateparser
 from yuki.config import BUDDY_NAME
 from yuki.db import (
     clear_onboarding,
+    clear_setup_goals,
+    create_goal,
     create_user,
     get_bot_state,
     get_buddy_state,
+    get_goal_by_title,
     get_user,
+    has_setup_goals,
+    list_goals,
     log_message,
     set_onboarding,
     set_reset_pending,
+    set_setup_goals,
+    update_goal_data,
     wipe_user,
 )
 from yuki.telegram import send_message
 
 logger = logging.getLogger(__name__)
 
-# Onboarding steps — string values because they persist in the db.
+# ---- onboarding steps (bot_state.onboarding_step) --------------------------
 STEP_NAME = "name"
 STEP_START_WEIGHT = "start_weight"
 STEP_TARGET_WEIGHT = "target_weight"
 STEP_DEADLINE = "deadline"
 STEP_CONFIRM = "confirm"
+
+# ---- setup_goals steps (bot_state.setup_goals_step) ------------------------
+SG_WEIGHT = "weight"
+SG_JAPANESE = "japanese"
+SG_FIELD = "field"
+SG_SUBJECTS = "subjects"
+SG_CONFIRM = "confirm"
+SG_REVIEW = "review"
+
+# ---- the three fixed goals — single source of truth ------------------------
+# Titles are used as identifiers, so keep them stable.
+WEIGHT_TITLE = "weight loss"
+JAPANESE_TITLE = "japanese"
+STUDIES_TITLE = "studies"
+
+JAPANESE_INITIAL_DATA: dict[str, Any] = {
+    "current_phase": "kana",          # kana -> beginner_vocab -> immersion (later)
+    "daily_minimum": "duolingo",
+    "next_milestone": "finish hiragana",
+}
+
+WEIGHT_DESCRIPTION = (
+    "shared journey — yuki's on the same weight-loss track, same numbers, "
+    "same deadline. she can have bad weeks too."
+)
+JAPANESE_DESCRIPTION = (
+    "learning japanese from zero. current phase auto-managed. "
+    "swap ritual: user teaches english, yuki teaches japanese (yuki is a native speaker)."
+)
+STUDIES_DESCRIPTION = (
+    "university studies — user's field + optional current-term subjects. "
+    "conversational, not number-tracked. yuki also has design classes she yaps about."
+)
+
+_YES = {"yes", "y", "yep", "yeah", "yup", "ok", "okay", "sure", "cool", "lock", "confirm"}
+_NO = {"no", "n", "nope", "nah"}
 
 
 # ---------------------------------------------------------------- helpers ----
@@ -64,8 +107,8 @@ def _parse_deadline(text: str) -> datetime | None:
 def handle_start(chat_id: int, user_id: int) -> None:
     logger.info("/start from user_id=%s", user_id)
 
-    if get_user(user_id):
-        existing = get_user(user_id)
+    existing = get_user(user_id)
+    if existing:
         send_message(
             chat_id,
             f"we're already set up — you're {existing['name']}, right? "
@@ -143,7 +186,7 @@ def continue_onboarding(
 
     if step == STEP_CONFIRM:
         answer = text.strip().lower()
-        if answer not in ("yes", "y", "yep", "yeah", "yup"):
+        if answer not in _YES:
             send_message(chat_id, "okay, run /start again when you want to redo this.")
             clear_onboarding(user_id)
             return
@@ -177,10 +220,12 @@ def handle_status(chat_id: int, user_id: int) -> None:
         send_message(chat_id, "no user row yet. run /start.")
         return
     buddy = get_buddy_state(user_id)
+    goals = list_goals(user_id)
 
     lines = ["users:"]
     for k, v in user.items():
         lines.append(f"  {k}: {v}")
+
     lines.append("")
     lines.append("buddy_state:")
     if buddy:
@@ -188,6 +233,19 @@ def handle_status(chat_id: int, user_id: int) -> None:
             lines.append(f"  {k}: {v}")
     else:
         lines.append("  (none)")
+
+    lines.append("")
+    lines.append(f"goals ({len(goals)}):")
+    if not goals:
+        lines.append("  (none — run /setup_goals)")
+    else:
+        for g in goals:
+            lines.append(
+                f"  id={g['id']} type={g['goal_type']} active={g['active']} title={g['title']!r}"
+            )
+            if g.get("data"):
+                lines.append(f"    data: {g['data']}")
+
     send_message(chat_id, "\n".join(lines))
 
 
@@ -198,8 +256,8 @@ def handle_reset(chat_id: int, user_id: int) -> None:
     set_reset_pending(user_id, True)
     send_message(
         chat_id,
-        "this wipes ALL your data — user, buddy state, messages, memories, everything. "
-        "reply YES to confirm.",
+        "this wipes ALL your data — user, buddy state, messages, memories, "
+        "goals, everything. reply YES to confirm.",
     )
 
 
@@ -216,24 +274,238 @@ def handle_reset_confirm(chat_id: int, user_id: int, text: str) -> None:
 
 def handle_setup_goals(chat_id: int, user_id: int) -> None:
     logger.info("/setup_goals from user_id=%s", user_id)
-    send_message(chat_id, "coming soon 🙌")
+
+    user = get_user(user_id)
+    if not user:
+        # Guard: onboarding must be done first
+        send_message(chat_id, "let's do /start first, i don't even know your name yet 😅")
+        return
+
+    if has_setup_goals(user_id):
+        # Already complete → show summary + offer to edit studies only
+        goals = list_goals(user_id)
+        send_message(chat_id, _format_goals_summary(user, goals))
+        send_message(
+            chat_id,
+            "the three goals are fixed but i can update your studies "
+            "(field or subjects). wanna change anything there? (yes/no)",
+        )
+        set_setup_goals(user_id, SG_REVIEW, {})
+        return
+
+    # Fresh flow — start at weight confirmation
+    _prompt_weight(chat_id, user_id, user)
+
+
+def _prompt_weight(chat_id: int, user_id: int, user: dict[str, Any]) -> None:
+    set_setup_goals(user_id, SG_WEIGHT, {})
+    send_message(
+        chat_id,
+        "ok let's lock in our goals. three things. this is the stuff i'll actually "
+        "be in your corner about 🌱",
+    )
+    send_message(
+        chat_id,
+        f"1. weight — {user['start_weight']}kg → {user['target_weight']}kg by "
+        f"{user['deadline_date']}. we're in this one together 💪",
+    )
+    send_message(chat_id, "sound right? (yes/no)")
+
+
+def continue_setup_goals(
+    chat_id: int, user_id: int, text: str, step: str, data: dict[str, Any]
+) -> None:
+    t = text.strip().lower()
+
+    # ---- weight confirmation ----
+    if step == SG_WEIGHT:
+        if t not in _YES:
+            send_message(
+                chat_id,
+                "the weight numbers came from /start. if they're wrong, "
+                "run /reset and /start again. bailing on /setup_goals for now.",
+            )
+            clear_setup_goals(user_id)
+            return
+        set_setup_goals(user_id, SG_JAPANESE, data)
+        send_message(
+            chat_id,
+            "2. japanese — you're starting from zero so step one is just kana "
+            "(hiragana + katakana). i'm actually native so… i got you 🇯🇵 "
+            "we'll do the whole english-japanese swap thing",
+        )
+        send_message(chat_id, "cool? (yes/no)")
+        return
+
+    # ---- japanese confirmation ----
+    if step == SG_JAPANESE:
+        if t not in _YES:
+            send_message(
+                chat_id,
+                "hmm, japanese is core for me — it's kind of the whole point of "
+                "the swap thing. wanna hold and try again later? "
+                "bailing on /setup_goals for now.",
+            )
+            clear_setup_goals(user_id)
+            return
+        set_setup_goals(user_id, SG_FIELD, data)
+        send_message(
+            chat_id,
+            "3. studies — what're you studying btw? "
+            "i'll actually wanna know what you learn. i yap about my classes too so 🫂",
+        )
+        return
+
+    # ---- studies field ----
+    if step == SG_FIELD:
+        field = text.strip()
+        if not field or len(field) > 200:
+            send_message(chat_id, "just a short answer works — 'CS', 'design', 'econ', whatever.")
+            return
+        data["field"] = field
+        set_setup_goals(user_id, SG_SUBJECTS, data)
+        send_message(
+            chat_id,
+            f"{field} — noted. what classes/subjects this term? "
+            "just list them casually (comma-separated is fine), or say 'skip' if you're not sure yet.",
+        )
+        return
+
+    # ---- studies subjects ----
+    if step == SG_SUBJECTS:
+        raw = text.strip()
+        if not raw or raw.lower() == "skip":
+            data["subjects"] = []
+        else:
+            subjects = [s.strip() for s in re.split(r"[,\n]", raw) if s.strip()]
+            data["subjects"] = subjects[:20]  # sanity cap
+        set_setup_goals(user_id, SG_CONFIRM, data)
+
+        # Edit mode: shorter confirmation, we're only updating studies
+        if data.get("_edit_mode"):
+            subs_disp = ", ".join(data["subjects"]) if data["subjects"] else "no specific classes yet"
+            send_message(
+                chat_id,
+                f"updating studies to: {data['field']} ({subs_disp}). "
+                "confirm? (yes/no)",
+            )
+            return
+
+        # Fresh setup: full three-line summary
+        user = get_user(user_id)
+        subs_disp = f" ({', '.join(data['subjects'])})" if data["subjects"] else ""
+        summary = "\n".join([
+            "ok here's the setup:",
+            "",
+            f"1. weight — {user['start_weight']}kg → {user['target_weight']}kg by "
+            f"{user['deadline_date']} (shared 💪)",
+            "2. japanese — starting with kana. i'll teach you, you teach me english 🇯🇵",
+            f"3. studies — {data['field']}{subs_disp}",
+            "",
+            "lock it in? (yes/no)",
+        ])
+        send_message(chat_id, summary)
+        return
+
+    # ---- final confirmation ----
+    if step == SG_CONFIRM:
+        if t not in _YES:
+            send_message(chat_id, "okay, bailing. run /setup_goals again when you're ready.")
+            clear_setup_goals(user_id)
+            return
+
+        if data.get("_edit_mode"):
+            studies = get_goal_by_title(user_id, STUDIES_TITLE)
+            if not studies:
+                # shouldn't happen — has_setup_goals said we had all 3
+                logger.error("edit mode but no studies goal for user_id=%s", user_id)
+                send_message(chat_id, "hmm couldn't find your studies row. try /setup_goals again?")
+                clear_setup_goals(user_id)
+                return
+            update_goal_data(int(studies["id"]), {
+                "field": data["field"],
+                "subjects": data["subjects"],
+            })
+            clear_setup_goals(user_id)
+            send_message(chat_id, "updated 👍")
+            return
+
+        # Fresh setup — create all three goals
+        create_goal(user_id, WEIGHT_TITLE, "shared", WEIGHT_DESCRIPTION, None)
+        create_goal(user_id, JAPANESE_TITLE, "core", JAPANESE_DESCRIPTION, JAPANESE_INITIAL_DATA)
+        create_goal(user_id, STUDIES_TITLE, "core", STUDIES_DESCRIPTION, {
+            "field": data["field"],
+            "subjects": data["subjects"],
+        })
+        clear_setup_goals(user_id)
+        send_message(chat_id, "locked in.")
+        send_message(
+            chat_id,
+            "that's us. i'll be honest i'm still kind of finding my voice here "
+            "but… give it time. we're gonna do this 🫂",
+        )
+        return
+
+    # ---- review (already complete) ----
+    if step == SG_REVIEW:
+        if t in _YES:
+            set_setup_goals(user_id, SG_FIELD, {"_edit_mode": True})
+            send_message(chat_id, "cool. what're you studying now?")
+            return
+        if t in _NO:
+            clear_setup_goals(user_id)
+            send_message(chat_id, "no worries, all locked in.")
+            return
+        send_message(chat_id, "yes or no?")
+        return
+
+    # Unknown step — self-heal
+    logger.warning("unknown setup_goals step %r for user_id=%s, clearing", step, user_id)
+    clear_setup_goals(user_id)
+    send_message(chat_id, "something got tangled. run /setup_goals again?")
+
+
+def _format_goals_summary(user: dict[str, Any], goals: list[dict[str, Any]]) -> str:
+    """Human-readable three-line summary used on re-run and (later) elsewhere."""
+    by_title = {g["title"]: g for g in goals}
+    lines = ["here's what's locked in:"]
+
+    if WEIGHT_TITLE in by_title:
+        lines.append(
+            f"1. weight — {user['start_weight']}kg → {user['target_weight']}kg by "
+            f"{user['deadline_date']} (shared 💪)"
+        )
+    if JAPANESE_TITLE in by_title:
+        d = by_title[JAPANESE_TITLE].get("data") or {}
+        phase = d.get("current_phase", "?")
+        lines.append(f"2. japanese — current phase: {phase} 🇯🇵")
+    if STUDIES_TITLE in by_title:
+        d = by_title[STUDIES_TITLE].get("data") or {}
+        field = d.get("field", "?")
+        subs = d.get("subjects") or []
+        subs_disp = f" ({', '.join(subs)})" if subs else ""
+        lines.append(f"3. studies — {field}{subs_disp}")
+
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------- free-form text ----
 
 def handle_free_text(chat_id: int, user_id: int, text: str) -> None:
-    """Any text that doesn't belong to onboarding/reset/commands."""
+    """Any text that doesn't belong to onboarding/reset/setup-goals/commands."""
     logger.info("free text user_id=%s len=%d", user_id, len(text))
     if not get_user(user_id):
         send_message(chat_id, "hey, run /start first so i know who i'm talking to.")
         return
     log_message(user_id, "user", text)
-    send_message(chat_id, "got it — llm not wired up yet, we're still in step 1")
+    send_message(chat_id, "got it — llm not wired up yet. we're between steps.")
 
 
 # --------------------------------------------------------- access control ----
 
-def handle_access_denied(chat_id: int | None, user_id: int | None, username: str | None) -> None:
+def handle_access_denied(
+    chat_id: int | None, user_id: int | None, username: str | None
+) -> None:
     logger.warning("access denied telegram_id=%s username=%s", user_id, username)
     if chat_id is not None:
         send_message(chat_id, "sorry, this is a private bot 🙏")

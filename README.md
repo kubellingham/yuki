@@ -4,13 +4,13 @@ a private telegram bot that's a long-term life companion — a character named y
 
 single-user by design. not a product.
 
-**status: step 1 of N — foundation only.** database schema, telegram handlers, access control, onboarding. no simulation engine, no proactive messages, no LLM wiring yet.
+**status: step 2 of N — goals system.** foundation (schema, onboarding, access control) is in from step 1; step 2 adds `/setup_goals` for the three fixed goals (weight/shared, japanese/core with phase tracking, studies/core with field + subjects). still no simulation engine, no proactive messages, no LLM wiring yet — those come in later steps.
 
 **deploy target: vercel + turso**, both free tiers, forever.
 
 ## how it works (at a glance)
 
-- **Vercel serverless functions** host `api/webhook.py` — telegram POSTs each of your messages to that URL, we run a short handler, we ack.
+- **Vercel serverless functions** host `api/index.py` — telegram POSTs each of your messages to `/api/webhook` (rewritten internally), we run a short handler, we ack.
 - **Turso** (hosted sqlite over HTTPS) is the persistent database. Same sqlite schema as a local db, just accessed remotely.
 - No polling process, no VM, no laptop — as long as vercel and turso are up, yuki is reachable.
 
@@ -67,7 +67,7 @@ hit this in your browser (replace both bits):
 https://<your-vercel-url>/api/migrate?secret=<WEBHOOK_SECRET>
 ```
 
-you should see `{"ok": true, "message": "schema applied"}`. safe to re-run — everything is `CREATE TABLE IF NOT EXISTS`.
+you should see `{"ok": true, "message": "schema applied"}`. safe to re-run — the CREATEs are `IF NOT EXISTS` and the column migrations are guarded by a `PRAGMA table_info` check (so re-runs just log "already present"). **run this again after pulling any new step** — steps that add columns rely on it.
 
 ### 7. register the webhook (once)
 
@@ -87,13 +87,17 @@ https://<your-vercel-url>/api/setup?secret=<WEBHOOK_SECRET>&action=info
 
 open your bot on telegram, send `/start`. that's it.
 
-## commands (step 1)
+## commands
 
 - `/start` — onboarding: asks name, current weight, target weight, deadline. creates your user row and yuki's matching buddy_state (she starts at the same weight, target, deadline).
-- `/status` — dev dump of your `users` row and yuki's `buddy_state` row.
-- `/reset` — wipes ALL your data. asks for `YES` to confirm.
-- `/setup_goals` — placeholder for step 2. currently replies "coming soon 🙌".
-- `/cancel` — bails out of the middle of `/start` or `/reset`.
+- `/setup_goals` — walks you through the three fixed goals:
+  1. **weight** (shared) — confirms the numbers from `/start`.
+  2. **japanese** (core) — starts you at the `kana` phase (hiragana + katakana). yuki is a native speaker; the goal carries a swap ritual (you teach her english, she teaches you japanese) that later steps will lean on.
+  3. **studies** (core) — asks your field, optionally your current-term subjects.
+  re-running after completion shows the summary and offers to update only the studies field/subjects (the three goals themselves are a fixed set).
+- `/status` — dev dump: your `users` row, yuki's `buddy_state`, and all your `goals` rows with their `data` JSON.
+- `/reset` — wipes ALL your data (users, goals, buddy state, messages, memories, everything). asks for `YES` to confirm.
+- `/cancel` — bails out of the middle of `/start`, `/reset`, or `/setup_goals`.
 - anything else — logged to `messages`, canned reply.
 
 ## inspecting the db
@@ -103,32 +107,32 @@ open your turso database in the dashboard → **SQL** tab, run:
 ```sql
 select * from users;
 select * from buddy_state;
+select id, title, goal_type, active, data from goals where user_id = <your id>;
 select * from messages order by id desc limit 20;
-select * from bot_state;  -- onboarding / reset flags
+select * from bot_state;  -- onboarding / setup_goals / reset flags
 ```
 
 ## project layout
 
 ```
 api/
-  webhook.py     # vercel handler — receives telegram updates
-  setup.py       # ?action=set|info|delete — registers webhook
-  migrate.py     # applies the schema (idempotent)
+  index.py       # single vercel entrypoint — routes /api/webhook, /api/setup, /api/migrate
 yuki/
   __init__.py
   config.py      # env loading, fail-fast on missing vars
   telegram.py    # thin wrapper over telegram bot api (sendMessage etc)
-  db.py          # libsql-client wrapper + named helpers + schema
-  handlers.py    # per-command / per-step handler functions
+  db.py          # libsql-client + SCHEMA_STATEMENTS + MIGRATIONS + named helpers
+  handlers.py    # per-command / per-step handler functions (onboarding + setup_goals)
   dispatch.py    # top-level router — reads bot_state, picks handler
-vercel.json
-requirements.txt
+vercel.json      # rewrites /api/{webhook,setup,migrate} → /api/index?_route=…
+pyproject.toml   # [project] deps + [tool.vercel] entrypoint
 .env.example
 ```
 
 ## what's next
 
-- **step 2** — `/setup_goals` for the three fixed goals (weight/shared, japanese/core, studies/core)
+- ~~**step 1** — foundation (schema + onboarding + access control)~~ ✅
+- ~~**step 2** — `/setup_goals` for the three fixed goals (weight/shared, japanese/core, studies/core)~~ ✅
 - **step 3** — yuki's simulated life engine (writes to `buddy_life`, evolves `buddy_state`)
 - **step 4** — proactive messaging with realistic delays. vercel hobby cron is 1x/day; we'll route around that with a free external cron (cron-job.org) pinging `/api/tick` every 10-15 min.
 - **step 5** — LLM wiring via openrouter, yuki's full personality, memory ingestion (facts / preferences / events / **callbacks** — advice you gave her that she uses on you later)
