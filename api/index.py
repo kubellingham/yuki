@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlparse
 from yuki.config import WEBHOOK_SECRET
 from yuki.db import apply_schema
 from yuki.dispatch import handle_update
+from yuki.simulator import tick_all
 from yuki.telegram import delete_webhook, get_webhook_info, set_webhook
 
 logging.basicConfig(
@@ -77,10 +78,12 @@ class handler(BaseHTTPRequestHandler):
             self._handle_setup(qs)
         elif route == "migrate":
             self._handle_migrate(qs)
+        elif route == "tick":
+            self._handle_tick(qs)
         elif route == "webhook":
             self._text(200, "yuki webhook up; POST an Update to talk to me")
         else:
-            self._json(200, {"ok": True, "app": "yuki", "hint": "try /api/setup or /api/migrate"})
+            self._json(200, {"ok": True, "app": "yuki", "hint": "try /api/setup, /api/migrate, or /api/tick"})
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
@@ -112,6 +115,19 @@ class handler(BaseHTTPRequestHandler):
         result = set_webhook(webhook_url, WEBHOOK_SECRET)
         result["_target_url"] = webhook_url
         self._json(200, result)
+
+    # ---------- tick (called by external cron every ~4h) ----------
+
+    def _handle_tick(self, qs: dict) -> None:
+        if not self._require_query_secret(qs):
+            return
+        try:
+            results = tick_all()
+        except Exception as e:  # noqa: BLE001
+            logger.exception("tick failed")
+            self._json(500, {"ok": False, "error": str(e)})
+            return
+        self._json(200, {"ok": True, "count": len(results), "results": results})
 
     # ---------- migrate ----------
 

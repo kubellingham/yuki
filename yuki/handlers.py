@@ -25,6 +25,7 @@ from yuki.db import (
     get_user,
     has_setup_goals,
     list_goals,
+    list_recent_life_events,
     log_message,
     set_onboarding,
     set_reset_pending,
@@ -248,6 +249,15 @@ def handle_status(chat_id: int, user_id: int) -> None:
             )
             if g.get("data"):
                 lines.append(f"    data: {g['data']}")
+
+    life = list_recent_life_events(user_id, limit=8)
+    lines.append("")
+    lines.append(f"recent buddy_life ({len(life)}):")
+    if not life:
+        lines.append("  (none — waiting on ticks)")
+    else:
+        for e in life:
+            lines.append(f"  [{e['domain']}] {e['occurred_at']}: {e['description']}")
 
     send_message(chat_id, "\n".join(lines))
 
@@ -545,7 +555,8 @@ def handle_free_text(chat_id: int, user_id: int, text: str) -> None:
 
     buddy = get_buddy_state(user_id)
     goals = list_goals(user_id)
-    system_prompt = build_system_prompt(user, buddy, goals)
+    life = list_recent_life_events(user_id, limit=5)
+    system_prompt = build_system_prompt(user, buddy, goals, recent_events=life)
     history = get_recent_messages(user_id, limit=20)
 
     try:

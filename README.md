@@ -4,7 +4,7 @@ a private telegram bot that's a long-term life companion — a character named y
 
 single-user by design. not a product.
 
-**status: step 5a of N — LLM wired.** foundation (step 1) + goals (step 2) + LLM for free-form chat (this step). free-form messages now go through OpenRouter (`deepseek/deepseek-chat` by default) with yuki's personality prompt + the last 20 messages of context. onboarding and `/setup_goals` stay hardcoded — LLM only handles genuine conversation. no simulation engine yet (step 3), no proactive messages (step 4), no memory ingestion (step 5b), no room-reading (step 6).
+**status: step 3 of N — simulated life engine.** foundation (step 1) + goals (step 2) + LLM chat (step 5a) + a background ticker that evolves yuki's mood, streak, weight, and occasionally emits a `buddy_life` event. every 4h a cron pings `/api/tick`, which for each user runs a mostly-deterministic tick (mood transition, weight drift, streak update) and ~40% of the time makes one LLM call to generate a natural-language life moment. yuki's system prompt now includes her last few life events, so when you talk to her she can reference the design class she just came out of, the walk she skipped, the hiragana chart she finished. **the "she lies about her weight" mechanic is now live** — when mood is down/tired/off she may report a lower number than her true weight (self-corrects over time). still no proactive messages (step 4), no memory ingestion (step 5b), no full room-reading (step 6 — only a light preview: extended quiet from you tilts her mood down).
 
 **deploy target: vercel + turso**, both free tiers, forever.
 
@@ -85,7 +85,20 @@ sanity check anytime:
 https://<your-vercel-url>/api/setup?secret=<WEBHOOK_SECRET>&action=info
 ```
 
-### 8. talk to yuki
+### 8. wire the simulated-life cron (once, for step 3)
+
+yuki's mood, streak, weight, and life events evolve on a background tick. vercel hobby cron is only 1x/day, so we use a free external cron.
+
+1. sign up at [cron-job.org](https://cron-job.org/) (GitHub login, no card)
+2. **Create cronjob**:
+   - **URL**: `https://yuki-wine.vercel.app/api/tick?secret=<WEBHOOK_SECRET>` (paste your actual secret)
+   - **Schedule**: every 4 hours (or hourly if you want faster evolution; nothing breaks, it just moves quicker)
+   - **Request method**: GET
+   - **Notifications**: your call — I usually leave failure-notifications on
+3. **Save**
+4. Optionally, click **Execute now** once to trigger the first tick immediately and see it in `/status`
+
+### 9. talk to yuki
 
 open your bot on telegram, send `/start`. that's it.
 
@@ -128,6 +141,7 @@ yuki/
   dispatch.py    # top-level router — reads bot_state, picks handler
   llm.py         # OpenRouter chat-completions client
   persona.py     # yuki's system prompt template + per-request assembly
+  simulator.py   # tick logic — mood/streak/weight evolution + life event generation
 vercel.json      # rewrites + 30s maxDuration for LLM calls
 pyproject.toml   # [project] deps + [tool.vercel] entrypoint
 .env.example
@@ -138,7 +152,7 @@ pyproject.toml   # [project] deps + [tool.vercel] entrypoint
 - ~~**step 1** — foundation (schema + onboarding + access control)~~ ✅
 - ~~**step 2** — `/setup_goals` for the three fixed goals (weight/shared, japanese/core, studies/core)~~ ✅
 - ~~**step 5a** — LLM wired for free-form chat via OpenRouter, yuki's personality prompt~~ ✅
-- **step 3** — yuki's simulated life engine (writes to `buddy_life`, evolves `buddy_state`); makes the "she lies" mechanic actually fire (buddy_state.current_weight can drift from true_weight)
-- **step 4** — proactive messaging with realistic delays. vercel hobby cron is 1x/day; we'll route around that with a free external cron (cron-job.org) pinging `/api/tick` every 10-15 min.
+- ~~**step 3** — simulated life engine (mood/streak/weight evolve on a 4h cron, occasional LLM-generated buddy_life events, "she lies" mechanic now active)~~ ✅
+- **step 4** — proactive messaging with realistic delays. same external cron pattern — a second endpoint decides whether yuki should text you and drafts the message.
 - **step 5b** — memory ingestion (facts / preferences / events / **callbacks** — advice you gave her that she uses on you later). LLM-as-classifier over recent messages.
-- **step 6** — reading the room: yuki notices when you've gone quiet or told her you're slammed, and eases off on her own
+- **step 6** — full room-reading: yuki notices when you've gone quiet or told her you're slammed, and eases off on her own (light preview of this already ships in step 3 — quiet from you tilts her mood down)

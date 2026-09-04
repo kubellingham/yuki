@@ -217,6 +217,64 @@ def get_buddy_state(user_id: int) -> dict[str, Any] | None:
         return _row_to_dict(rs, rs.rows[0])
 
 
+def update_buddy_state(user_id: int, fields: dict[str, Any]) -> None:
+    """Patch selected columns on buddy_state. Only whitelisted columns pass."""
+    allowed = {"current_weight", "true_weight", "mood", "streak", "last_event", "bio"}
+    updates = {k: v for k, v in fields.items() if k in allowed}
+    if not updates:
+        return
+    updates["updated_at"] = _now_iso()
+    cols = ", ".join(f"{k} = ?" for k in updates)
+    with _client() as c:
+        c.execute(
+            f"UPDATE buddy_state SET {cols} WHERE user_id = ?",
+            [*updates.values(), user_id],
+        )
+    logger.info("buddy_state updated user_id=%s fields=%s", user_id, list(updates.keys()))
+
+
+def list_all_users() -> list[dict[str, Any]]:
+    """Every onboarded user. Single-user in practice, but ticker iterates."""
+    with _client() as c:
+        rs = c.execute("SELECT * FROM users")
+        return [_row_to_dict(rs, r) for r in rs.rows]
+
+
+def get_last_user_message_ts(user_id: int) -> str | None:
+    """ISO timestamp of the most recent message with role='user', or None."""
+    with _client() as c:
+        rs = c.execute(
+            "SELECT timestamp FROM messages WHERE user_id = ? AND role = 'user'"
+            " ORDER BY id DESC LIMIT 1",
+            [user_id],
+        )
+        if not rs.rows:
+            return None
+        return rs.rows[0]["timestamp"]
+
+
+def create_life_event(
+    user_id: int, domain: str, description: str, occurred_at: str | None = None
+) -> None:
+    with _client() as c:
+        c.execute(
+            "INSERT INTO buddy_life (user_id, domain, description, occurred_at, resolved)"
+            " VALUES (?, ?, ?, ?, 0)",
+            [user_id, domain, description, occurred_at or _now_iso()],
+        )
+    logger.info("life event user_id=%s domain=%s desc=%r", user_id, domain, description[:80])
+
+
+def list_recent_life_events(user_id: int, limit: int = 5) -> list[dict[str, Any]]:
+    """Newest first — used in persona context so Yuki knows what she just did."""
+    with _client() as c:
+        rs = c.execute(
+            "SELECT * FROM buddy_life WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+            [user_id, limit],
+        )
+        return [_row_to_dict(rs, r) for r in rs.rows]
+
+
 def log_message(user_id: int, role: str, content: str) -> None:
     with _client() as c:
         c.execute(

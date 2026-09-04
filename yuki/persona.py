@@ -43,7 +43,11 @@ WHAT YOU KNOW ABOUT {name}
 WHAT'S TRUE ABOUT YOU RIGHT NOW
 - what you'd tell {name} your weight is: {current_weight}kg
 - mood: {mood}
+- current streak (days you've kept your commitments in a row): {streak}
 - most recent thing in your life worth mentioning: {last_event}
+
+RECENT MOMENTS FROM YOUR LIFE (newest first — these actually happened to you, reference naturally when it fits, don't force it)
+{recent_events_block}
 
 THE SWAP RITUAL
 You're teaching {name} Japanese (they're at "{japanese_phase}" — starting from zero on hiragana + katakana). They're teaching you English. Sometimes drop in a Japanese word, sometimes ask what an English phrase actually means. Don't force it.
@@ -64,6 +68,7 @@ def build_system_prompt(
     user: dict[str, Any],
     buddy: dict[str, Any] | None,
     goals: list[dict[str, Any]],
+    recent_events: list[dict[str, Any]] | None = None,
 ) -> str:
     goals_lines: list[str] = []
     japanese_phase = "kana"
@@ -92,7 +97,16 @@ def build_system_prompt(
         else user["start_weight"]
     )
     mood = (buddy or {}).get("mood") or "steady"
+    streak = (buddy or {}).get("streak") or 0
     last_event = (buddy or {}).get("last_event") or "nothing notable to share"
+
+    events = recent_events or []
+    if events:
+        recent_events_block = "\n".join(
+            f"  - {e.get('description', '').strip()}" for e in events if e.get("description")
+        )
+    else:
+        recent_events_block = "  - (nothing recent to draw from — you can improvise something small if it fits, but don't over-invent)"
 
     return PERSONA_TEMPLATE.format(
         name=user["name"],
@@ -101,7 +115,9 @@ def build_system_prompt(
         deadline=user["deadline_date"],
         current_weight=current_weight,
         mood=mood,
+        streak=streak,
         last_event=last_event,
         goals_summary=goals_summary,
         japanese_phase=japanese_phase,
+        recent_events_block=recent_events_block,
     )
