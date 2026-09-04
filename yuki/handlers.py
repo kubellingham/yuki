@@ -21,6 +21,7 @@ from yuki.db import (
     get_bot_state,
     get_buddy_state,
     get_goal_by_title,
+    get_recent_messages,
     get_user,
     has_setup_goals,
     list_goals,
@@ -31,7 +32,9 @@ from yuki.db import (
     update_goal_data,
     wipe_user,
 )
-from yuki.telegram import send_message
+from yuki.llm import LlmError, chat as llm_chat, is_enabled as llm_enabled
+from yuki.persona import build_system_prompt
+from yuki.telegram import send_message, send_typing
 
 logger = logging.getLogger(__name__)
 
@@ -492,13 +495,48 @@ def _format_goals_summary(user: dict[str, Any], goals: list[dict[str, Any]]) -> 
 # --------------------------------------------------------- free-form text ----
 
 def handle_free_text(chat_id: int, user_id: int, text: str) -> None:
-    """Any text that doesn't belong to onboarding/reset/setup-goals/commands."""
+    """Free-form chat — this is where the LLM actually lives.
+
+    Hardcoded flows (onboarding, setup_goals, reset) are handled upstream in
+    dispatch.py, so anything landing here is genuine conversation.
+    """
     logger.info("free text user_id=%s len=%d", user_id, len(text))
-    if not get_user(user_id):
+
+    user = get_user(user_id)
+    if not user:
         send_message(chat_id, "hey, run /start first so i know who i'm talking to.")
         return
+
+    # Log the incoming turn FIRST so it's part of the history the LLM sees.
     log_message(user_id, "user", text)
-    send_message(chat_id, "got it — llm not wired up yet. we're between steps.")
+
+    if not llm_enabled():
+        # Graceful degrade if the key was pulled from env.
+        send_message(chat_id, "brain's offline (no api key). we're just logging for now.")
+        return
+
+    # Nice touch: show "typing…" while we assemble + call the LLM.
+    send_typing(chat_id)
+
+    buddy = get_buddy_state(user_id)
+    goals = list_goals(user_id)
+    system_prompt = build_system_prompt(user, buddy, goals)
+    history = get_recent_messages(user_id, limit=20)
+
+    try:
+        reply = llm_chat(system_prompt, history)
+    except LlmError as e:
+        logger.warning("llm failed: %s", e)
+        send_message(chat_id, "hmm brain glitched for a sec. try again?")
+        return
+
+    if not reply:
+        logger.warning("empty llm reply")
+        send_message(chat_id, "…")
+        return
+
+    log_message(user_id, "buddy", reply)
+    send_message(chat_id, reply)
 
 
 # --------------------------------------------------------- access control ----

@@ -4,7 +4,7 @@ a private telegram bot that's a long-term life companion — a character named y
 
 single-user by design. not a product.
 
-**status: step 2 of N — goals system.** foundation (schema, onboarding, access control) is in from step 1; step 2 adds `/setup_goals` for the three fixed goals (weight/shared, japanese/core with phase tracking, studies/core with field + subjects). still no simulation engine, no proactive messages, no LLM wiring yet — those come in later steps.
+**status: step 5a of N — LLM wired.** foundation (step 1) + goals (step 2) + LLM for free-form chat (this step). free-form messages now go through OpenRouter (`deepseek/deepseek-chat` by default) with yuki's personality prompt + the last 20 messages of context. onboarding and `/setup_goals` stay hardcoded — LLM only handles genuine conversation. no simulation engine yet (step 3), no proactive messages (step 4), no memory ingestion (step 5b), no room-reading (step 6).
 
 **deploy target: vercel + turso**, both free tiers, forever.
 
@@ -50,13 +50,15 @@ that's your `WEBHOOK_SECRET`.
 
 1. push this repo to github (or fork it)
 2. on [vercel.com](https://vercel.com), **Add New… → Project → Import** the repo
-3. in **Environment Variables**, add all five:
+3. in **Environment Variables**, add all six:
    - `TELEGRAM_BOT_TOKEN`
    - `MY_TELEGRAM_ID`
    - `TURSO_DATABASE_URL`
    - `TURSO_AUTH_TOKEN`
    - `WEBHOOK_SECRET`
+   - `OPENROUTER_API_KEY` — get one at [openrouter.ai](https://openrouter.ai/); yuki won't have a brain without it (chat will degrade to "brain's offline" until it's set)
    - (optional) `BUDDY_NAME` — defaults to `Yuki`
+   - (optional) `MODEL_NAME` — defaults to `deepseek/deepseek-chat`. any OpenRouter model id works.
 4. click **Deploy**. wait ~1 minute. you'll get a URL like `https://yuki-abc123.vercel.app`.
 
 ### 6. apply the schema (once)
@@ -98,7 +100,7 @@ open your bot on telegram, send `/start`. that's it.
 - `/status` — dev dump: your `users` row, yuki's `buddy_state`, and all your `goals` rows with their `data` JSON.
 - `/reset` — wipes ALL your data (users, goals, buddy state, messages, memories, everything). asks for `YES` to confirm.
 - `/cancel` — bails out of the middle of `/start`, `/reset`, or `/setup_goals`.
-- anything else — logged to `messages`, canned reply.
+- **anything else** — routed to yuki via OpenRouter with her personality prompt + the last 20 messages as context. logged to `messages` on both sides so future turns build on prior turns.
 
 ## inspecting the db
 
@@ -120,11 +122,13 @@ api/
 yuki/
   __init__.py
   config.py      # env loading, fail-fast on missing vars
-  telegram.py    # thin wrapper over telegram bot api (sendMessage etc)
+  telegram.py    # sendMessage + sendChatAction (typing indicator)
   db.py          # libsql-client + SCHEMA_STATEMENTS + MIGRATIONS + named helpers
-  handlers.py    # per-command / per-step handler functions (onboarding + setup_goals)
+  handlers.py    # per-command / per-step handler functions (onboarding + setup_goals + free-form-with-LLM)
   dispatch.py    # top-level router — reads bot_state, picks handler
-vercel.json      # rewrites /api/{webhook,setup,migrate} → /api/index?_route=…
+  llm.py         # OpenRouter chat-completions client
+  persona.py     # yuki's system prompt template + per-request assembly
+vercel.json      # rewrites + 30s maxDuration for LLM calls
 pyproject.toml   # [project] deps + [tool.vercel] entrypoint
 .env.example
 ```
@@ -133,7 +137,8 @@ pyproject.toml   # [project] deps + [tool.vercel] entrypoint
 
 - ~~**step 1** — foundation (schema + onboarding + access control)~~ ✅
 - ~~**step 2** — `/setup_goals` for the three fixed goals (weight/shared, japanese/core, studies/core)~~ ✅
-- **step 3** — yuki's simulated life engine (writes to `buddy_life`, evolves `buddy_state`)
+- ~~**step 5a** — LLM wired for free-form chat via OpenRouter, yuki's personality prompt~~ ✅
+- **step 3** — yuki's simulated life engine (writes to `buddy_life`, evolves `buddy_state`); makes the "she lies" mechanic actually fire (buddy_state.current_weight can drift from true_weight)
 - **step 4** — proactive messaging with realistic delays. vercel hobby cron is 1x/day; we'll route around that with a free external cron (cron-job.org) pinging `/api/tick` every 10-15 min.
-- **step 5** — LLM wiring via openrouter, yuki's full personality, memory ingestion (facts / preferences / events / **callbacks** — advice you gave her that she uses on you later)
+- **step 5b** — memory ingestion (facts / preferences / events / **callbacks** — advice you gave her that she uses on you later). LLM-as-classifier over recent messages.
 - **step 6** — reading the room: yuki notices when you've gone quiet or told her you're slammed, and eases off on her own

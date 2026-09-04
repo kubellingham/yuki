@@ -31,6 +31,19 @@ def send_message(chat_id: int, text: str) -> None:
         logger.exception("sendMessage failed: %s", e)
 
 
+def send_typing(chat_id: int) -> None:
+    """Show the 'typing…' indicator in the chat for ~5 seconds. Cosmetic —
+    swallow all errors, this is never a reason to fail a turn."""
+    try:
+        httpx.post(
+            f"{API_BASE}/sendChatAction",
+            json={"chat_id": chat_id, "action": "typing"},
+            timeout=3.0,
+        )
+    except httpx.HTTPError:
+        pass
+
+
 def set_webhook(url: str, secret: str) -> dict:
     r = httpx.post(
         f"{API_BASE}/setWebhook",

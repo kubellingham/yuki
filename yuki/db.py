@@ -227,6 +227,26 @@ def log_message(user_id: int, role: str, content: str) -> None:
     logger.info("logged message user_id=%s role=%s len=%d", user_id, role, len(content))
 
 
+def get_recent_messages(user_id: int, limit: int = 20) -> list[dict[str, str]]:
+    """Return the last `limit` messages, oldest-first, mapped into
+    OpenAI-chat shape (`{"role": "user"|"assistant", "content": str}`)."""
+    with _client() as c:
+        rs = c.execute(
+            "SELECT role, content FROM messages WHERE user_id = ?"
+            " ORDER BY id DESC LIMIT ?",
+            [user_id, limit],
+        )
+        rows = [_row_to_dict(rs, r) for r in rs.rows]
+    rows.reverse()  # chronological for the LLM
+    return [
+        {
+            "role": "assistant" if r["role"] == "buddy" else "user",
+            "content": r["content"],
+        }
+        for r in rows
+    ]
+
+
 def wipe_user(telegram_id: int) -> None:
     """Cascade wipes users + all child rows. Also clears bot_state."""
     with _client() as c:
