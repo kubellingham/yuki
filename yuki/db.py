@@ -97,13 +97,16 @@ SCHEMA_STATEMENTS = [
     # Reset confirmation shares the row via `reset_pending`. Setup-goals uses its own step/data.
     """
     CREATE TABLE IF NOT EXISTS bot_state (
-        telegram_id       INTEGER PRIMARY KEY,
-        onboarding_step   TEXT,
-        onboarding_data   TEXT,
-        setup_goals_step  TEXT,
-        setup_goals_data  TEXT,
-        reset_pending     INTEGER NOT NULL DEFAULT 0,
-        updated_at        TEXT NOT NULL
+        telegram_id                  INTEGER PRIMARY KEY,
+        onboarding_step              TEXT,
+        onboarding_data              TEXT,
+        setup_goals_step             TEXT,
+        setup_goals_data             TEXT,
+        reset_pending                INTEGER NOT NULL DEFAULT 0,
+        last_memory_ingest_msg_id    INTEGER,
+        user_state                   TEXT,
+        user_state_at                TEXT,
+        updated_at                   TEXT NOT NULL
     )
     """,
 ]
@@ -112,9 +115,12 @@ SCHEMA_STATEMENTS = [
 # (table, column, sqlite type) — applied by apply_schema() to bring old DBs
 # up to date. Each is guarded by a PRAGMA check so re-runs are safe.
 MIGRATIONS: list[tuple[str, str, str]] = [
-    ("goals",     "data",             "TEXT"),
-    ("bot_state", "setup_goals_step", "TEXT"),
-    ("bot_state", "setup_goals_data", "TEXT"),
+    ("goals",     "data",                      "TEXT"),
+    ("bot_state", "setup_goals_step",          "TEXT"),
+    ("bot_state", "setup_goals_data",          "TEXT"),
+    ("bot_state", "last_memory_ingest_msg_id", "INTEGER"),
+    ("bot_state", "user_state",                "TEXT"),
+    ("bot_state", "user_state_at",             "TEXT"),
 ]
 
 
@@ -479,6 +485,82 @@ def clear_setup_goals(telegram_id: int) -> None:
         )
     logger.info("bot_state setup_goals cleared user_id=%s", telegram_id)
 
+
+def set_last_memory_ingest(telegram_id: int, msg_id: int) -> None:
+    now = _now_iso()
+    with _client() as c:
+        c.execute(
+            "INSERT INTO bot_state (telegram_id, last_memory_ingest_msg_id, updated_at)"
+            " VALUES (?, ?, ?)"
+            " ON CONFLICT(telegram_id) DO UPDATE SET"
+            "   last_memory_ingest_msg_id = excluded.last_memory_ingest_msg_id,"
+            "   updated_at                = excluded.updated_at",
+            [telegram_id, msg_id, now],
+        )
+    logger.info("bot_state last_memory_ingest user_id=%s msg_id=%s", telegram_id, msg_id)
+
+
+def set_user_state(telegram_id: int, state: str) -> None:
+    now = _now_iso()
+    with _client() as c:
+        c.execute(
+            "INSERT INTO bot_state (telegram_id, user_state, user_state_at, updated_at)"
+            " VALUES (?, ?, ?, ?)"
+            " ON CONFLICT(telegram_id) DO UPDATE SET"
+            "   user_state    = excluded.user_state,"
+            "   user_state_at = excluded.user_state_at,"
+            "   updated_at    = excluded.updated_at",
+            [telegram_id, state, now, now],
+        )
+    logger.info("bot_state user_state user_id=%s state=%r", telegram_id, state[:80])
+
+
+def get_new_user_messages_since(
+    user_id: int, since_id: int | None, limit: int = 30
+) -> list[dict[str, Any]]:
+    """User messages with id > since_id, oldest-first. Used by memory ingestion."""
+    if since_id is None:
+        since_id = 0
+    with _client() as c:
+        rs = c.execute(
+            "SELECT id, content, timestamp FROM messages"
+            " WHERE user_id = ? AND role = 'user' AND id > ?"
+            " ORDER BY id ASC LIMIT ?",
+            [user_id, since_id, limit],
+        )
+        return [_row_to_dict(rs, r) for r in rs.rows]
+
+
+# ------------------------------------------------------------- memories ----
+
+def create_memory(
+    user_id: int, category: str, content: str, importance: int
+) -> None:
+    importance = max(1, min(5, int(importance)))
+    with _client() as c:
+        c.execute(
+            "INSERT INTO memories (user_id, category, content, importance, created_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            [user_id, category, content, importance, _now_iso()],
+        )
+    logger.info(
+        "memory saved user_id=%s cat=%s imp=%d content=%r",
+        user_id, category, importance, content[:80],
+    )
+
+
+def list_top_memories(user_id: int, limit: int = 8) -> list[dict[str, Any]]:
+    """Top by importance, then recency. Used for persona injection."""
+    with _client() as c:
+        rs = c.execute(
+            "SELECT * FROM memories WHERE user_id = ?"
+            " ORDER BY importance DESC, id DESC LIMIT ?",
+            [user_id, limit],
+        )
+        return [_row_to_dict(rs, r) for r in rs.rows]
+
+
+# --------------------------------------------------------------- other -----
 
 def set_reset_pending(telegram_id: int, pending: bool) -> None:
     now = _now_iso()

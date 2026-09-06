@@ -33,6 +33,7 @@ FORMAT — this is a real telegram chat, not a story you're writing
 - NEVER write in the third person ("she pauses", "yuki grins"). You ARE Yuki. You just send messages.
 - If you want to send multiple messages in a row (which is what real texting looks like), separate them with a blank line — the client will send each as its own message. 2 or 3 max, only when it feels natural.
 - Asterisks for mid-sentence emphasis (like "i'm *really* tired") are fine. Whole-line asterisks are not — those read as stage directions.
+- Parentheticals like "(also lowkey curious…)" are a real texting move — fine occasionally. But if you find yourself ending several messages in a row with one, that's a tic; say it plainly instead. Mix it up.
 
 WHAT YOU KNOW ABOUT {name}
 - name: {name}
@@ -48,6 +49,12 @@ WHAT'S TRUE ABOUT YOU RIGHT NOW
 
 RECENT MOMENTS FROM YOUR LIFE (newest first — these actually happened to you, reference naturally when it fits, don't force it)
 {recent_events_block}
+
+WHAT YOU REMEMBER ABOUT {name} (long-term, kept across all past chats — reference naturally when relevant, don't dump)
+{memories_block}
+
+HOW {name} SEEMS RIGHT NOW (inferred from their recent messages — read the room, match this)
+{user_state_block}
 
 THE SWAP RITUAL
 You're teaching {name} Japanese (they're at "{japanese_phase}" — starting from zero on hiragana + katakana). They're teaching you English. Sometimes drop in a Japanese word, sometimes ask what an English phrase actually means. Don't force it.
@@ -69,6 +76,8 @@ def build_system_prompt(
     buddy: dict[str, Any] | None,
     goals: list[dict[str, Any]],
     recent_events: list[dict[str, Any]] | None = None,
+    memories: list[dict[str, Any]] | None = None,
+    user_state: str | None = None,
 ) -> str:
     goals_lines: list[str] = []
     japanese_phase = "kana"
@@ -108,6 +117,32 @@ def build_system_prompt(
     else:
         recent_events_block = "  - (nothing recent to draw from — you can improvise something small if it fits, but don't over-invent)"
 
+    mem_list = memories or []
+    if mem_list:
+        # Group by category so it reads as facts / preferences / callbacks etc.
+        by_cat: dict[str, list[str]] = {}
+        for m in mem_list:
+            cat = (m.get("category") or "other").strip()
+            content = (m.get("content") or "").strip()
+            if not content:
+                continue
+            by_cat.setdefault(cat, []).append(content)
+        mem_lines: list[str] = []
+        # Callbacks first — most emotionally sharp
+        for cat in ("callback", "fact", "preference", "event"):
+            if cat not in by_cat:
+                continue
+            for content in by_cat[cat]:
+                mem_lines.append(f"  - [{cat}] {content}")
+        memories_block = "\n".join(mem_lines) if mem_lines else "  - (nothing yet)"
+    else:
+        memories_block = "  - (nothing yet — memories are ingested as you chat over time)"
+
+    if user_state:
+        user_state_block = f"  {user_state.strip()}"
+    else:
+        user_state_block = "  (not enough recent messages to tell yet)"
+
     return PERSONA_TEMPLATE.format(
         name=user["name"],
         start_weight=user["start_weight"],
@@ -120,4 +155,6 @@ def build_system_prompt(
         goals_summary=goals_summary,
         japanese_phase=japanese_phase,
         recent_events_block=recent_events_block,
+        memories_block=memories_block,
+        user_state_block=user_state_block,
     )

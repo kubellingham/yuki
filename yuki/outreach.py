@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from yuki.config import USER_TIMEZONE
 from yuki.db import (
+    get_bot_state,
     get_buddy_state,
     get_last_buddy_message_ts,
     get_last_user_message_ts,
@@ -26,18 +27,20 @@ from yuki.db import (
     list_all_users,
     list_goals,
     list_recent_life_events,
+    list_top_memories,
     log_message,
 )
 from yuki.llm import LlmError, chat as llm_chat, is_enabled as llm_enabled
 from yuki.persona import build_system_prompt
 from yuki.reply_format import clean_llm_reply, split_into_bursts
+from yuki.roomread import state_signal
 from yuki.telegram import send_message
 
 logger = logging.getLogger(__name__)
 
 _QUIET_START_HOUR = 22   # inclusive: no outreach at/after this hour local
 _QUIET_END_HOUR = 7      # exclusive: no outreach before this hour local
-_MIN_GAP_HOURS = 4       # min hours since either side last spoke
+_MIN_GAP_HOURS = 2       # min hours since either side last spoke (tuned down from 4h)
 
 
 def _tz() -> ZoneInfo:
@@ -84,29 +87,47 @@ def should_outreach(user_id: int) -> tuple[bool, str, float]:
     if buddy and buddy.get("mood") == "off":
         return False, "mood_off", 0.0
 
-    # Base probability keyed to how long the user's been quiet
-    if last_user_h < 8:
-        p = 0.05
-    elif last_user_h < 24:
-        p = 0.20
-    elif last_user_h < 72:
-        p = 0.35
-    else:
+    # Base probability keyed to how long the user's been quiet.
+    # Tuned up from step-4-initial to feel more like a real friend on a
+    # shared journey (per user feedback — real friends text more).
+    if last_user_h < 4:
+        p = 0.08
+    elif last_user_h < 12:
+        p = 0.30
+    elif last_user_h < 48:
         p = 0.50
+    else:
+        p = 0.65
 
     # Fresh event boost — if a life event landed in the last ~3h,
-    # she's more likely to want to share it
+    # she's more likely to want to share it.
     events = list_recent_life_events(user_id, limit=1)
     if events:
         age = _hours_since(events[0].get("occurred_at"))
         if age < 3:
-            p += 0.20
+            p += 0.25
 
-    p = min(p, 0.85)
+    # Mood-aware nudge — high-energy moods reach out more, low-energy less.
+    mood = (buddy or {}).get("mood")
+    if mood in ("up", "hopeful", "excited"):
+        p += 0.10
+    elif mood in ("down", "tired"):
+        p -= 0.05
+
+    # Room-reading nudge — if user seems slammed/stressed, back off; if
+    # upbeat, lean in slightly.
+    state = get_bot_state(user_id) or {}
+    sig = state_signal(state.get("user_state"))
+    if sig == "stress":
+        p -= 0.20
+    elif sig == "upbeat":
+        p += 0.05
+
+    p = max(0.0, min(p, 0.90))
 
     if random.random() < p:
-        return True, f"fire (user_quiet={last_user_h:.1f}h)", p
-    return False, f"skip (user_quiet={last_user_h:.1f}h)", p
+        return True, f"fire (user_quiet={last_user_h:.1f}h mood={mood} vibe={sig})", p
+    return False, f"skip (user_quiet={last_user_h:.1f}h mood={mood} vibe={sig})", p
 
 
 _OUTREACH_APPENDIX = """
@@ -128,8 +149,15 @@ def draft_outreach(
     goals: list[dict[str, Any]],
     recent_events: list[dict[str, Any]],
     history: list[dict[str, str]],
+    memories: list[dict[str, Any]] | None = None,
+    user_state: str | None = None,
 ) -> str:
-    system = build_system_prompt(user, buddy, goals, recent_events=recent_events)
+    system = build_system_prompt(
+        user, buddy, goals,
+        recent_events=recent_events,
+        memories=memories,
+        user_state=user_state,
+    )
     system += _OUTREACH_APPENDIX.format(name=user["name"])
 
     # Some models want a user-role tail message to trigger a response. If the
@@ -170,10 +198,16 @@ def run_outreach() -> list[dict[str, Any]]:
         buddy = get_buddy_state(user_id)
         goals = list_goals(user_id)
         events = list_recent_life_events(user_id, limit=5)
+        memories = list_top_memories(user_id, limit=8)
+        state = get_bot_state(user_id) or {}
         history = get_recent_messages(user_id, limit=20)
 
         try:
-            raw = draft_outreach(user, buddy, goals, events, history)
+            raw = draft_outreach(
+                user, buddy, goals, events, history,
+                memories=memories,
+                user_state=state.get("user_state"),
+            )
         except LlmError as e:
             logger.warning("outreach llm failed user_id=%s: %s", user_id, e)
             summary["error"] = str(e)

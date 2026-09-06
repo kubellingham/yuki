@@ -31,6 +31,8 @@ from yuki.db import (
     update_buddy_state,
 )
 from yuki.llm import LlmError, chat as llm_chat, is_enabled as llm_enabled
+from yuki.memory import ingest_for_user
+from yuki.roomread import refresh_for_user
 
 logger = logging.getLogger(__name__)
 
@@ -260,6 +262,20 @@ def tick_user(user: dict[str, Any]) -> dict[str, Any]:
         bool(event_summary),
     )
 
+    # Piggyback: memory ingestion + room-reading. Both cheap, both benefit
+    # from the same tick cadence. Failures are logged and swallowed — the
+    # tick's main job is buddy_state, not these.
+    memory_summary = None
+    roomread_summary = None
+    try:
+        memory_summary = ingest_for_user(user)
+    except Exception:  # noqa: BLE001
+        logger.exception("memory ingest raised for user_id=%s", user_id)
+    try:
+        roomread_summary = refresh_for_user(user)
+    except Exception:  # noqa: BLE001
+        logger.exception("roomread raised for user_id=%s", user_id)
+
     return {
         "user_id": user_id,
         "mood": {"from": old_mood, "to": new_mood},
@@ -269,6 +285,8 @@ def tick_user(user: dict[str, Any]) -> dict[str, Any]:
         "lie_delta": lie,
         "quiet_hours": round(quiet_h, 1),
         "event": event_summary,
+        "memory": memory_summary,
+        "roomread": roomread_summary,
     }
 
 

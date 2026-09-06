@@ -4,7 +4,7 @@ a private telegram bot that's a long-term life companion — a character named y
 
 single-user by design. not a product.
 
-**status: step 4 of N — proactive messaging.** foundation (step 1) + goals (step 2) + LLM chat (step 5a) + simulated life (step 3) + **yuki reaches out on her own** (this step). a second cron pings `/api/outreach` every ~30 min; per-user it runs a deterministic decision (quiet-hours mute, back off if either side messaged in the last 4h, respect `mood=off`, probability scales with how long you've been quiet, +20% boost if a fresh life event just landed) and only when it fires does it spend one LLM call to draft a short natural text. still no memory ingestion (step 5b), no full room-reading (step 6 — light preview already ships: quiet from you tilts her mood down, and mood=off backs her off entirely).
+**status: fully feature-complete.** step 1 (foundation) + step 2 (`/setup_goals`) + step 5a (LLM chat) + step 3 (simulated life + weight-lie mechanic) + step 4 (proactive outreach) + step 5b (memory ingestion) + step 6 (room-reading). yuki has a mood, a life that evolves every few hours, reaches out on her own when you're quiet, remembers what mattered from your past chats (facts / preferences / events / **callbacks** — advice you gave her that she can throw back at you), and reads your recent messages to gauge your state and adjust tone + outreach frequency accordingly. all four background processes piggyback on one cron endpoint (`/api/tick`) that runs every ~3h, plus the outreach decision on `/api/outreach` every ~30min.
 
 **deploy target: vercel + turso**, both free tiers, forever.
 
@@ -155,8 +155,10 @@ yuki/
   llm.py         # OpenRouter chat-completions client
   persona.py     # yuki's system prompt template + per-request assembly
   reply_format.py # shared LLM reply cleanup + burst splitting
-  simulator.py   # tick logic — mood/streak/weight evolution + life event generation
+  simulator.py   # tick logic — mood/streak/weight evolution + life events + piggybacks memory + roomread
   outreach.py    # proactive-messaging decision + drafting
+  memory.py      # per-tick LLM classifier that extracts durable facts / callbacks from user messages
+  roomread.py    # per-tick LLM classifier that infers user_state ("slammed with uni", "chill", etc)
 vercel.json      # rewrites + 30s maxDuration for LLM calls
 pyproject.toml   # [project] deps + [tool.vercel] entrypoint
 .env.example
@@ -169,5 +171,7 @@ pyproject.toml   # [project] deps + [tool.vercel] entrypoint
 - ~~**step 5a** — LLM wired for free-form chat via OpenRouter, yuki's personality prompt~~ ✅
 - ~~**step 3** — simulated life engine (mood/streak/weight evolve on a 4h cron, occasional LLM-generated buddy_life events, "she lies" mechanic now active)~~ ✅
 - ~~**step 4** — proactive messaging (deterministic decision every 30 min: quiet hours, cooldown, mood check, quiet-scaled probability + fresh-event boost; LLM drafts only when it fires)~~ ✅
-- **step 5b** — memory ingestion (facts / preferences / events / **callbacks** — advice you gave her that she uses on you later). LLM-as-classifier over recent messages.
-- **step 6** — full room-reading: yuki notices when you've gone quiet or told her you're slammed, and eases off on her own (light preview of this already ships in steps 3 + 4 — quiet from you tilts her mood down, and mood=off mutes outreach)
+- ~~**step 5b** — memory ingestion (LLM classifier extracts facts / preferences / events / **callbacks** from user messages, stores in `memories` table with importance 1-5, top N injected into every future persona turn)~~ ✅
+- ~~**step 6** — room-reading (LLM infers a short `user_state` phrase from recent user messages; injected into persona so yuki matches energy; feeds outreach probability — stress vibes reduce, upbeat vibes boost)~~ ✅
+
+**Roadmap done.** From here it's ongoing tuning — probability curves, persona nudges, adding new mechanics as they earn their keep from real use.

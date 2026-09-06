@@ -26,6 +26,7 @@ from yuki.db import (
     has_setup_goals,
     list_goals,
     list_recent_life_events,
+    list_top_memories,
     log_message,
     set_onboarding,
     set_reset_pending,
@@ -259,6 +260,23 @@ def handle_status(chat_id: int, user_id: int) -> None:
     else:
         for e in life:
             lines.append(f"  [{e['domain']}] {e['occurred_at']}: {e['description']}")
+
+    mems = list_top_memories(user_id, limit=10)
+    lines.append("")
+    lines.append(f"top memories ({len(mems)}):")
+    if not mems:
+        lines.append("  (none — memory ingestion runs on each tick)")
+    else:
+        for m in mems:
+            lines.append(f"  [{m['category']} imp={m['importance']}] {m['content']}")
+
+    state = get_bot_state(user_id) or {}
+    lines.append("")
+    lines.append("user_state:")
+    if state.get("user_state"):
+        lines.append(f"  {state['user_state']} (@ {state.get('user_state_at')})")
+    else:
+        lines.append("  (not inferred yet)")
 
     send_message(chat_id, "\n".join(lines))
 
@@ -532,7 +550,14 @@ def handle_free_text(chat_id: int, user_id: int, text: str) -> None:
     buddy = get_buddy_state(user_id)
     goals = list_goals(user_id)
     life = list_recent_life_events(user_id, limit=5)
-    system_prompt = build_system_prompt(user, buddy, goals, recent_events=life)
+    memories = list_top_memories(user_id, limit=8)
+    state = get_bot_state(user_id) or {}
+    system_prompt = build_system_prompt(
+        user, buddy, goals,
+        recent_events=life,
+        memories=memories,
+        user_state=state.get("user_state"),
+    )
     history = get_recent_messages(user_id, limit=20)
 
     try:
