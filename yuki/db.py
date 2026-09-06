@@ -253,6 +253,20 @@ def get_last_user_message_ts(user_id: int) -> str | None:
         return rs.rows[0]["timestamp"]
 
 
+def get_last_buddy_message_ts(user_id: int) -> str | None:
+    """ISO timestamp of the most recent message with role='buddy', or None.
+    Used by outreach to avoid back-to-back sends."""
+    with _client() as c:
+        rs = c.execute(
+            "SELECT timestamp FROM messages WHERE user_id = ? AND role = 'buddy'"
+            " ORDER BY id DESC LIMIT 1",
+            [user_id],
+        )
+        if not rs.rows:
+            return None
+        return rs.rows[0]["timestamp"]
+
+
 def create_life_event(
     user_id: int, domain: str, description: str, occurred_at: str | None = None
 ) -> None:

@@ -4,9 +4,10 @@
     "api/index.py": { "maxDuration": 30 }
   },
   "rewrites": [
-    { "source": "/api/webhook", "destination": "/api/index?_route=webhook" },
-    { "source": "/api/setup",   "destination": "/api/index?_route=setup" },
-    { "source": "/api/migrate", "destination": "/api/index?_route=migrate" },
-    { "source": "/api/tick",    "destination": "/api/index?_route=tick" }
+    { "source": "/api/webhook",  "destination": "/api/index?_route=webhook" },
+    { "source": "/api/setup",    "destination": "/api/index?_route=setup" },
+    { "source": "/api/migrate",  "destination": "/api/index?_route=migrate" },
+    { "source": "/api/tick",     "destination": "/api/index?_route=tick" },
+    { "source": "/api/outreach", "destination": "/api/index?_route=outreach" }
   ]
 }

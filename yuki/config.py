@@ -31,3 +31,7 @@ WEBHOOK_SECRET: str = _require("WEBHOOK_SECRET")
 # Not used in step 1, read only so misconfig later fails fast.
 OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
 MODEL_NAME: str = os.getenv("MODEL_NAME", "deepseek/deepseek-chat")
+
+# Used by outreach quiet-hours window (default UTC). Any zoneinfo name works,
+# e.g. "Africa/Lagos", "Europe/London", "America/New_York".
+USER_TIMEZONE: str = os.getenv("USER_TIMEZONE", "UTC")

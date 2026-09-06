@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlparse
 from yuki.config import WEBHOOK_SECRET
 from yuki.db import apply_schema
 from yuki.dispatch import handle_update
+from yuki.outreach import run_outreach
 from yuki.simulator import tick_all
 from yuki.telegram import delete_webhook, get_webhook_info, set_webhook
 
@@ -80,10 +81,12 @@ class handler(BaseHTTPRequestHandler):
             self._handle_migrate(qs)
         elif route == "tick":
             self._handle_tick(qs)
+        elif route == "outreach":
+            self._handle_outreach(qs)
         elif route == "webhook":
             self._text(200, "yuki webhook up; POST an Update to talk to me")
         else:
-            self._json(200, {"ok": True, "app": "yuki", "hint": "try /api/setup, /api/migrate, or /api/tick"})
+            self._json(200, {"ok": True, "app": "yuki", "hint": "try /api/setup, /api/migrate, /api/tick, or /api/outreach"})
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
@@ -125,6 +128,19 @@ class handler(BaseHTTPRequestHandler):
             results = tick_all()
         except Exception as e:  # noqa: BLE001
             logger.exception("tick failed")
+            self._json(500, {"ok": False, "error": str(e)})
+            return
+        self._json(200, {"ok": True, "count": len(results), "results": results})
+
+    # ---------- outreach (called by external cron every ~30 min) ----------
+
+    def _handle_outreach(self, qs: dict) -> None:
+        if not self._require_query_secret(qs):
+            return
+        try:
+            results = run_outreach()
+        except Exception as e:  # noqa: BLE001
+            logger.exception("outreach failed")
             self._json(500, {"ok": False, "error": str(e)})
             return
         self._json(200, {"ok": True, "count": len(results), "results": results})

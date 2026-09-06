@@ -4,7 +4,7 @@ a private telegram bot that's a long-term life companion — a character named y
 
 single-user by design. not a product.
 
-**status: step 3 of N — simulated life engine.** foundation (step 1) + goals (step 2) + LLM chat (step 5a) + a background ticker that evolves yuki's mood, streak, weight, and occasionally emits a `buddy_life` event. every 4h a cron pings `/api/tick`, which for each user runs a mostly-deterministic tick (mood transition, weight drift, streak update) and ~40% of the time makes one LLM call to generate a natural-language life moment. yuki's system prompt now includes her last few life events, so when you talk to her she can reference the design class she just came out of, the walk she skipped, the hiragana chart she finished. **the "she lies about her weight" mechanic is now live** — when mood is down/tired/off she may report a lower number than her true weight (self-corrects over time). still no proactive messages (step 4), no memory ingestion (step 5b), no full room-reading (step 6 — only a light preview: extended quiet from you tilts her mood down).
+**status: step 4 of N — proactive messaging.** foundation (step 1) + goals (step 2) + LLM chat (step 5a) + simulated life (step 3) + **yuki reaches out on her own** (this step). a second cron pings `/api/outreach` every ~30 min; per-user it runs a deterministic decision (quiet-hours mute, back off if either side messaged in the last 4h, respect `mood=off`, probability scales with how long you've been quiet, +20% boost if a fresh life event just landed) and only when it fires does it spend one LLM call to draft a short natural text. still no memory ingestion (step 5b), no full room-reading (step 6 — light preview already ships: quiet from you tilts her mood down, and mood=off backs her off entirely).
 
 **deploy target: vercel + turso**, both free tiers, forever.
 
@@ -59,6 +59,7 @@ that's your `WEBHOOK_SECRET`.
    - `OPENROUTER_API_KEY` — get one at [openrouter.ai](https://openrouter.ai/); yuki won't have a brain without it (chat will degrade to "brain's offline" until it's set)
    - (optional) `BUDDY_NAME` — defaults to `Yuki`
    - (optional) `MODEL_NAME` — defaults to `deepseek/deepseek-chat`. any OpenRouter model id works.
+   - (optional) `USER_TIMEZONE` — defaults to `UTC`. sets the quiet-hours window (22:00–07:00 local) that gates proactive outreach. any zoneinfo name works, e.g. `Africa/Lagos`, `Europe/London`, `America/New_York`.
 4. click **Deploy**. wait ~1 minute. you'll get a URL like `https://yuki-abc123.vercel.app`.
 
 ### 6. apply the schema (once)
@@ -98,7 +99,19 @@ yuki's mood, streak, weight, and life events evolve on a background tick. vercel
 3. **Save**
 4. Optionally, click **Execute now** once to trigger the first tick immediately and see it in `/status`
 
-### 9. talk to yuki
+### 9. wire the outreach cron (once, for step 4)
+
+separate cron so it can run more often than the life ticker.
+
+1. still in [cron-job.org](https://cron-job.org/), **Create cronjob** again
+2. **URL**: `https://yuki-wine.vercel.app/api/outreach?secret=<WEBHOOK_SECRET>`
+3. **Schedule**: every 30 minutes (`*/30 * * * *`)
+4. **Method**: GET
+5. Save
+
+each ping either sends nothing (most of the time) or fires one short unprompted message from yuki. she's silent during your quiet hours, silent for the first 4h after either of you spoke, and silent when her mood is `off`.
+
+### 10. talk to yuki
 
 open your bot on telegram, send `/start`. that's it.
 
@@ -141,7 +154,9 @@ yuki/
   dispatch.py    # top-level router — reads bot_state, picks handler
   llm.py         # OpenRouter chat-completions client
   persona.py     # yuki's system prompt template + per-request assembly
+  reply_format.py # shared LLM reply cleanup + burst splitting
   simulator.py   # tick logic — mood/streak/weight evolution + life event generation
+  outreach.py    # proactive-messaging decision + drafting
 vercel.json      # rewrites + 30s maxDuration for LLM calls
 pyproject.toml   # [project] deps + [tool.vercel] entrypoint
 .env.example
@@ -153,6 +168,6 @@ pyproject.toml   # [project] deps + [tool.vercel] entrypoint
 - ~~**step 2** — `/setup_goals` for the three fixed goals (weight/shared, japanese/core, studies/core)~~ ✅
 - ~~**step 5a** — LLM wired for free-form chat via OpenRouter, yuki's personality prompt~~ ✅
 - ~~**step 3** — simulated life engine (mood/streak/weight evolve on a 4h cron, occasional LLM-generated buddy_life events, "she lies" mechanic now active)~~ ✅
-- **step 4** — proactive messaging with realistic delays. same external cron pattern — a second endpoint decides whether yuki should text you and drafts the message.
+- ~~**step 4** — proactive messaging (deterministic decision every 30 min: quiet hours, cooldown, mood check, quiet-scaled probability + fresh-event boost; LLM drafts only when it fires)~~ ✅
 - **step 5b** — memory ingestion (facts / preferences / events / **callbacks** — advice you gave her that she uses on you later). LLM-as-classifier over recent messages.
-- **step 6** — full room-reading: yuki notices when you've gone quiet or told her you're slammed, and eases off on her own (light preview of this already ships in step 3 — quiet from you tilts her mood down)
+- **step 6** — full room-reading: yuki notices when you've gone quiet or told her you're slammed, and eases off on her own (light preview of this already ships in steps 3 + 4 — quiet from you tilts her mood down, and mood=off mutes outreach)
