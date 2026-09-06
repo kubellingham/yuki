@@ -7,6 +7,7 @@ function ceiling so we can fail gracefully.
 from __future__ import annotations
 
 import logging
+import time
 
 import httpx
 
@@ -40,12 +41,15 @@ def chat(
     max_tokens: int = 250,
     temperature: float = 0.9,
     timeout_s: float = 25.0,
+    max_retries: int = 1,
 ) -> str:
     """Send system + history to the model, return the assistant's reply.
 
     `history` is a list of {"role": "user"|"assistant", "content": "..."} dicts
     in chronological order. We prepend the system message and pass the whole
     thing straight through — OpenAI-compatible schema.
+
+    Retries once on 429 (shared free-pool rate limit at the upstream provider).
     """
     if not is_enabled():
         raise LlmError("OPENROUTER_API_KEY not set")
@@ -61,16 +65,28 @@ def chat(
         MODEL_NAME, len(history), max_tokens,
     )
 
-    try:
-        r = httpx.post(_ENDPOINT, headers=_HEADERS, json=body, timeout=timeout_s)
-    except httpx.TimeoutException as e:
-        raise LlmError(f"timeout after {timeout_s}s") from e
-    except httpx.HTTPError as e:
-        raise LlmError(f"http error: {e}") from e
+    r = None
+    for attempt in range(max_retries + 1):
+        try:
+            r = httpx.post(_ENDPOINT, headers=_HEADERS, json=body, timeout=timeout_s)
+        except httpx.TimeoutException as e:
+            raise LlmError(f"timeout after {timeout_s}s") from e
+        except httpx.HTTPError as e:
+            raise LlmError(f"http error: {e}") from e
 
-    if r.status_code != 200:
+        if r.status_code == 429 and attempt < max_retries:
+            wait = 3.0
+            logger.warning(
+                "llm 429 rate-limited by upstream, retrying in %.1fs (attempt %d/%d)",
+                wait, attempt + 1, max_retries,
+            )
+            time.sleep(wait)
+            continue
+        break
+
+    if r is None or r.status_code != 200:
         # OpenRouter puts the useful bit in the response body
-        raise LlmError(f"status {r.status_code}: {r.text[:500]}")
+        raise LlmError(f"status {r.status_code if r else '?'}: {(r.text[:500] if r else '')}")
 
     try:
         data = r.json()
